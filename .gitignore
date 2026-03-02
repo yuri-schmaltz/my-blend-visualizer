@@ -1,0 +1,14 @@
+.gradle/
+local.properties
+*.iml
+.idea/
+build/
+captures/
+.DS_Store
+Thumbs.db
+app/build/
+converter-backend/.venv/
+converter-backend/storage/
+converter-backend/tmp/
+converter-backend/__pycache__/
+converter-backend/app/__pycache__/
