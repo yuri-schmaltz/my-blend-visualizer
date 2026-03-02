@@ -52,3 +52,4 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 - Backend: `converter-backend/tests/test_api.py` (executado com `pytest`, 7 testes).
 - Android: testes unitarios adicionados em `app/src/test/java/com/myblendvisualizer/ui/BlendViewerViewModelTest.kt`.
+- Checklist operacional: `CHECKLIST_VALIDACAO.md`.
