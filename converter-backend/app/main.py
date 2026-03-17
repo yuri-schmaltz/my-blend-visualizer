@@ -5,9 +5,12 @@ import shutil
 import subprocess
 import uuid
 import hmac
+import time
+from datetime import datetime
 from pathlib import Path
+from typing import Dict, Optional, Any
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
@@ -25,10 +28,21 @@ CONVERTER_API_KEY = os.getenv("CONVERTER_API_KEY", "").strip()
 TMP_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+# In-memory status tracking
+conversion_tasks: Dict[str, Dict[str, Any]] = {}
 
-class ConversionResponse(BaseModel):
-    model_url: str
-    size_bytes: int
+
+class ConversionRequestResponse(BaseModel):
+    task_id: str
+
+
+class ConversionStatusResponse(BaseModel):
+    task_id: str
+    status: str  # pending, processing, completed, failed
+    model_url: Optional[str] = None
+    size_bytes: Optional[int] = None
+    error: Optional[str] = None
+    created_at: str
 
 
 app = FastAPI(title="Blend Converter API", version="0.1.0")
@@ -37,25 +51,41 @@ app.mount("/files", StaticFiles(directory=OUTPUT_DIR), name="files")
 
 @app.get("/health")
 def health() -> dict[str, object]:
+    blender_path = shutil.which(BLENDER_BIN)
     return {
         "status": "ok",
         "blender_bin": BLENDER_BIN,
-        "blender_available": shutil.which(BLENDER_BIN) is not None,
+        "blender_path": blender_path,
+        "blender_available": blender_path is not None,
         "auth_enabled": bool(CONVERTER_API_KEY),
+        "active_tasks": len([t for t in conversion_tasks.values() if t["status"] in ("pending", "processing")]),
+        "message": (
+            "Blender pronto para uso." if blender_path 
+            else "Blender nao encontrado! Configure BLENDER_BIN ou instale o blender."
+        )
     }
 
 
-@app.post("/convert", response_model=ConversionResponse)
-async def convert(request: Request, file: UploadFile = File(...)) -> ConversionResponse:
+@app.post("/convert", response_model=ConversionRequestResponse)
+async def convert(
+    request: Request, 
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...)
+) -> ConversionRequestResponse:
     require_api_key(request)
     filename = file.filename or ""
     if not filename.lower().endswith(".blend"):
         raise HTTPException(status_code=400, detail="Envie um arquivo com extensao .blend.")
 
-    run_id = uuid.uuid4().hex
-    input_path = TMP_DIR / f"{run_id}.blend"
-    output_name = f"{run_id}.glb"
-    output_path = OUTPUT_DIR / output_name
+    task_id = uuid.uuid4().hex
+    input_path = TMP_DIR / f"{task_id}.blend"
+    
+    # Pre-save status
+    conversion_tasks[task_id] = {
+        "status": "pending",
+        "created_at": datetime.now().isoformat(),
+        "input_path": input_path
+    }
 
     max_upload_bytes = MAX_UPLOAD_MB * 1024 * 1024
     bytes_written = 0
@@ -77,44 +107,64 @@ async def convert(request: Request, file: UploadFile = File(...)) -> ConversionR
         if bytes_written == 0:
             raise HTTPException(status_code=400, detail="Arquivo vazio.")
 
+        # Add background task
+        background_tasks.add_task(
+            async_conversion_handler, task_id, str(request.base_url)
+        )
+        
+        return ConversionRequestResponse(task_id=task_id)
+
+    except Exception:
+        input_path.unlink(missing_ok=True)
+        if task_id in conversion_tasks:
+            del conversion_tasks[task_id]
+        raise
+
+
+@app.get("/status/{task_id}", response_model=ConversionStatusResponse)
+async def get_status(task_id: str) -> ConversionStatusResponse:
+    if task_id not in conversion_tasks:
+        raise HTTPException(status_code=404, detail="Tarefa nao encontrada.")
+    
+    task = conversion_tasks[task_id]
+    return ConversionStatusResponse(
+        task_id=task_id,
+        status=task["status"],
+        model_url=task.get("model_url"),
+        size_bytes=task.get("size_bytes"),
+        error=task.get("error"),
+        created_at=task["created_at"]
+    )
+
+
+async def async_conversion_handler(task_id: str, base_url: str) -> None:
+    task = conversion_tasks[task_id]
+    task["status"] = "processing"
+    
+    input_path = task["input_path"]
+    output_name = f"{task_id}.glb"
+    output_path = OUTPUT_DIR / output_name
+
+    try:
         await run_in_threadpool(run_blender_conversion, input_path, output_path)
 
         if not output_path.exists():
-            raise HTTPException(
-                status_code=500,
-                detail="Conversao finalizada sem gerar arquivo .glb.",
-            )
+            raise RuntimeError("Conversao finalizada sem gerar arquivo .glb.")
 
-        model_url = f"{str(request.base_url).rstrip('/')}/files/{output_name}"
-        return ConversionResponse(
-            model_url=model_url,
-            size_bytes=output_path.stat().st_size,
-        )
-    except HTTPException:
-        output_path.unlink(missing_ok=True)
-        raise
-    except FileNotFoundError:
-        output_path.unlink(missing_ok=True)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Blender nao encontrado em '{BLENDER_BIN}'.",
-        )
-    except subprocess.TimeoutExpired:
-        output_path.unlink(missing_ok=True)
-        raise HTTPException(
-            status_code=504,
-            detail=f"Conversao excedeu {CONVERSION_TIMEOUT_SECONDS} segundos.",
-        )
-    except Exception as exception:
-        output_path.unlink(missing_ok=True)
-        detail = str(exception).strip() or "Erro inesperado durante a conversao."
-        raise HTTPException(status_code=500, detail=detail[:1000])
+        task["status"] = "completed"
+        task["model_url"] = f"{base_url.rstrip('/')}/files/{output_name}"
+        task["size_bytes"] = output_path.stat().st_size
+    except Exception as e:
+        task["status"] = "failed"
+        task["error"] = str(e)
     finally:
-        await file.close()
         input_path.unlink(missing_ok=True)
 
 
 def run_blender_conversion(input_path: Path, output_path: Path) -> None:
+    if shutil.which(BLENDER_BIN) is None:
+        raise FileNotFoundError(f"Blender nao encontrado em '{BLENDER_BIN}'.")
+
     command = [
         BLENDER_BIN,
         "-b",

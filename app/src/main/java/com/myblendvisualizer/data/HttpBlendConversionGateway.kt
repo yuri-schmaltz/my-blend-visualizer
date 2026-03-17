@@ -46,70 +46,76 @@ class HttpBlendConversionGateway(
                 )
                 .build()
 
-            var attempt = 0
-            while (attempt <= maxRetries) {
-                attempt += 1
-                try {
-                    val request = Request.Builder()
-                        .url("$normalizedBaseUrl/convert")
-                        .post(multipartBody)
-                        .apply {
-                            if (apiKey.isNotBlank()) {
-                                addHeader("X-API-Key", apiKey)
-                            }
+            val initialRequest = Request.Builder()
+                .url("$normalizedBaseUrl/convert")
+                .post(multipartBody)
+                .apply {
+                    if (apiKey.isNotBlank()) {
+                        addHeader("X-API-Key", apiKey)
+                    }
+                }
+                .build()
+
+            val taskId = httpClient.newCall(initialRequest).execute().use { response ->
+                val payload = response.body?.string().orEmpty()
+                if (!response.isSuccessful) {
+                    val apiError = parseErrorMessage(payload)
+                    return BlendConversionResult.Error(apiError ?: "Falha no backend (${response.code}).")
+                }
+                parseTaskId(payload) ?: return BlendConversionResult.Error("Resposta invalida: task_id ausente.")
+            }
+
+            // Polling loop
+            var pollAttempt = 0
+            val maxPollAttempts = 60 // 2 minutes with 2s interval
+            
+            while (pollAttempt < maxPollAttempts) {
+                pollAttempt++
+                delay(2000)
+
+                val statusRequest = Request.Builder()
+                    .url("$normalizedBaseUrl/status/$taskId")
+                    .get()
+                    .apply {
+                        if (apiKey.isNotBlank()) {
+                            addHeader("X-API-Key", apiKey)
                         }
-                        .build()
+                    }
+                    .build()
 
-                    var shouldRetry = false
-                    var result: BlendConversionResult? = null
+                httpClient.newCall(statusRequest).execute().use { response ->
+                    val payload = response.body?.string().orEmpty()
+                    if (!response.isSuccessful) {
+                        return BlendConversionResult.Error("Falha ao consultar status (${response.code}).")
+                    }
 
-                    httpClient.newCall(request).execute().use { response ->
-                        val payload = response.body?.string().orEmpty()
-                        if (response.isSuccessful) {
-                            val modelUrl = parseModelUrl(payload)
-                            if (modelUrl.isNullOrBlank()) {
-                                result = BlendConversionResult.Error(
-                                    "Resposta invalida do backend: model_url ausente."
-                                )
+                    val json = JSONObject(payload)
+                    val status = json.optString("status")
+                    
+                    when (status) {
+                        "completed" -> {
+                            val modelUrl = json.optString("model_url")
+                            return if (modelUrl.isNotBlank()) {
+                                BlendConversionResult.Success(android.net.Uri.parse(modelUrl))
                             } else {
-                                result = BlendConversionResult.Success(
-                                    modelUri = android.net.Uri.parse(modelUrl)
-                                )
+                                BlendConversionResult.Error("URL do modelo ausente na resposta.")
                             }
-                            return@use
                         }
-
-                        if (response.code in 500..599 && attempt <= maxRetries) {
-                            shouldRetry = true
-                            Log.w(TAG, "Tentativa $attempt falhou com ${response.code}. Retentando...")
-                            return@use
+                        "failed" -> {
+                            val error = json.optString("error")
+                            return BlendConversionResult.Error(error.ifBlank { "Falha na conversao." })
                         }
-
-                        val apiError = parseErrorMessage(payload)
-                        result = BlendConversionResult.Error(
-                            apiError ?: "Falha no backend (${response.code})."
-                        )
+                        "processing", "pending" -> {
+                            Log.d(TAG, "Conversao em andamento ($status)... Tentativa $pollAttempt")
+                        }
+                        else -> {
+                            return BlendConversionResult.Error("Status inesperado: $status")
+                        }
                     }
-
-                    if (shouldRetry) {
-                        delay(backoffDelayMs(attempt))
-                        continue
-                    }
-                    return result ?: BlendConversionResult.Error(
-                        "Falha inesperada na comunicacao com o backend."
-                    )
-                } catch (ioException: IOException) {
-                    if (attempt <= maxRetries) {
-                        Log.w(TAG, "Erro de rede na tentativa $attempt: ${ioException.message}")
-                        delay(backoffDelayMs(attempt))
-                        continue
-                    }
-                    return BlendConversionResult.Error(
-                        "Erro de rede: ${ioException.message ?: "desconhecido"}"
-                    )
                 }
             }
-            BlendConversionResult.Error("Nao foi possivel concluir a conversao apos varias tentativas.")
+
+            BlendConversionResult.Error("Tempo limite de conversao excedido.")
         } catch (exception: Exception) {
             BlendConversionResult.Error("Falha na conversao: ${exception.message ?: "desconhecida"}")
         } finally {
@@ -117,12 +123,11 @@ class HttpBlendConversionGateway(
         }
     }
 
-    private fun backoffDelayMs(attempt: Int): Long {
-        return when (attempt) {
-            1 -> 500L
-            2 -> 1200L
-            else -> 2000L
-        }
+    private fun parseTaskId(payload: String): String? {
+        if (payload.isBlank()) return null
+        return runCatching { JSONObject(payload).optString("task_id") }
+            .getOrNull()
+            ?.takeIf { it.isNotBlank() }
     }
 
     private fun copyUriToTempFile(file: BlendFile, destination: File) {
@@ -133,13 +138,6 @@ class HttpBlendConversionGateway(
                 input.copyTo(output)
             }
         }
-    }
-
-    private fun parseModelUrl(payload: String): String? {
-        if (payload.isBlank()) return null
-        return runCatching { JSONObject(payload).optString("model_url") }
-            .getOrNull()
-            ?.takeIf { it.isNotBlank() }
     }
 
     private fun parseErrorMessage(payload: String): String? {

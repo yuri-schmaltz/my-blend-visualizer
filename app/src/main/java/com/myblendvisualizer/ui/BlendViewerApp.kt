@@ -133,15 +133,13 @@ fun BlendViewerApp(
 
                 HorizontalDivider()
 
-                Text(
-                    text = "Histórico Local",
-                    style = MaterialTheme.typography.titleMedium
-                )
-
                 HistoryList(
                     history = history,
-                    onSelect = { entry ->
+                    onItemClick = { entry ->
                         viewModel.onHistoryEntrySelected(entry)
+                    },
+                    onClearHistory = {
+                        viewModel.clearHistory()
                     },
                     modifier = Modifier.weight(1f)
                 )
@@ -293,23 +291,46 @@ private fun InAppGlbViewerDialog(
 
 @Composable
 private fun HistoryList(
-    history: List<com.myblendvisualizer.data.local.HistoryEntry>,
-    onSelect: (com.myblendvisualizer.data.local.HistoryEntry) -> Unit,
+    history: List<HistoryEntry>,
+    onItemClick: (HistoryEntry) -> Unit,
+    onClearHistory: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    if (history.isEmpty()) {
-        Text(
-            text = "Nenhuma conversão anterior encontrada.",
-            style = MaterialTheme.typography.bodySmall,
-            modifier = modifier.padding(vertical = 8.dp)
-        )
-    } else {
-        LazyColumn(
-            modifier = modifier,
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
+    LazyColumn(
+        modifier = modifier,
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        item {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Histórico Local",
+                    style = MaterialTheme.typography.titleMedium
+                )
+                if (history.isNotEmpty()) {
+                    androidx.compose.material3.TextButton(onClick = onClearHistory) {
+                        Text("Limpar Tudo")
+                    }
+                }
+            }
+        }
+
+        if (history.isEmpty()) {
+            item {
+                Text(
+                    text = "Nenhuma conversão anterior encontrada.",
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(vertical = 8.dp)
+                )
+            }
+        } else {
             items(history) { entry ->
-                HistoryItem(entry = entry, onSelect = { onSelect(entry) })
+                HistoryItem(entry = entry, onSelect = { onItemClick(entry) })
             }
         }
     }
@@ -317,7 +338,7 @@ private fun HistoryList(
 
 @Composable
 private fun HistoryItem(
-    entry: com.myblendvisualizer.data.local.HistoryEntry,
+    entry: HistoryEntry,
     onSelect: () -> Unit
 ) {
     Card(

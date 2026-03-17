@@ -144,4 +144,12 @@ class BlendViewerViewModel(
             }
         }
     }
+
+    fun clearHistory() {
+        viewModelScope.launch {
+            withContext(ioDispatcher) {
+                historyDao.clearHistory()
+            }
+        }
+    }
 }
