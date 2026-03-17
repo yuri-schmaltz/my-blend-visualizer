@@ -10,20 +10,25 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.weight
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -33,6 +38,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.myblendvisualizer.data.resolveBlendFile
+import com.myblendvisualizer.data.local.HistoryEntry
 import com.myblendvisualizer.model.BlendFile
 import io.github.sceneview.Scene
 import io.github.sceneview.math.Position
@@ -50,6 +56,7 @@ fun BlendViewerApp(
 ) {
     val context = LocalContext.current
     val uiState = viewModel.uiState
+    val history by viewModel.historyEntries.collectAsState()
     var showInAppViewer by rememberSaveable { mutableStateOf(false) }
 
     val pickerLauncher = rememberLauncherForActivityResult(contract = OpenDocument()) { uri ->
@@ -123,6 +130,21 @@ fun BlendViewerApp(
                 }
 
                 StatusCard(message = uiState.statusMessage)
+
+                HorizontalDivider()
+
+                Text(
+                    text = "Histórico Local",
+                    style = MaterialTheme.typography.titleMedium
+                )
+
+                HistoryList(
+                    history = history,
+                    onSelect = { entry ->
+                        viewModel.onHistoryEntrySelected(entry)
+                    },
+                    modifier = Modifier.weight(1f)
+                )
             }
         }
     }
@@ -263,6 +285,64 @@ private fun InAppGlbViewerDialog(
                         targetPosition = centerNode.worldPosition
                     ),
                     childNodes = listOf(centerNode, loadedModelNode)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun HistoryList(
+    history: List<com.myblendvisualizer.data.local.HistoryEntry>,
+    onSelect: (com.myblendvisualizer.data.local.HistoryEntry) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    if (history.isEmpty()) {
+        Text(
+            text = "Nenhuma conversão anterior encontrada.",
+            style = MaterialTheme.typography.bodySmall,
+            modifier = modifier.padding(vertical = 8.dp)
+        )
+    } else {
+        LazyColumn(
+            modifier = modifier,
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            items(history) { entry ->
+                HistoryItem(entry = entry, onSelect = { onSelect(entry) })
+            }
+        }
+    }
+}
+
+@Composable
+private fun HistoryItem(
+    entry: com.myblendvisualizer.data.local.HistoryEntry,
+    onSelect: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        onClick = onSelect
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Text(
+                text = entry.fileName,
+                style = MaterialTheme.typography.bodyMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = formatBytes(entry.sizeBytes),
+                    style = MaterialTheme.typography.bodySmall
+                )
+                Text(
+                    text = java.text.SimpleDateFormat("dd/MM HH:mm", java.util.Locale.getDefault())
+                        .format(java.util.Date(entry.timestamp)),
+                    style = MaterialTheme.typography.bodySmall
                 )
             }
         }

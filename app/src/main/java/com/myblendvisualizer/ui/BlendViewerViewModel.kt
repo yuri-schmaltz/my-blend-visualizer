@@ -12,11 +12,16 @@ import androidx.lifecycle.viewmodel.viewModelFactory
 import com.myblendvisualizer.data.BlendConversionGateway
 import com.myblendvisualizer.data.BlendConversionResult
 import com.myblendvisualizer.data.HttpBlendConversionGateway
-import com.myblendvisualizer.data.MockBlendConversionGateway
 import com.myblendvisualizer.BuildConfig
 import com.myblendvisualizer.model.BlendFile
+import com.myblendvisualizer.data.local.HistoryDao
+import com.myblendvisualizer.data.local.HistoryEntry
+import com.myblendvisualizer.data.local.AppDatabase
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -36,11 +41,19 @@ data class BlendViewerUiState(
 
 class BlendViewerViewModel(
     private val conversionGateway: BlendConversionGateway,
+    private val historyDao: HistoryDao,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
 ) : ViewModel() {
 
     var uiState by mutableStateOf(BlendViewerUiState())
         private set
+
+    val historyEntries: StateFlow<List<HistoryEntry>> = historyDao.getAllHistory()
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5000),
+            initialValue = emptyList()
+        )
 
     fun onBlendSelected(file: BlendFile) {
         uiState = uiState.copy(
@@ -60,6 +73,19 @@ class BlendViewerViewModel(
         )
     }
 
+    fun onHistoryEntrySelected(entry: HistoryEntry) {
+        uiState = uiState.copy(
+            selectedFile = com.myblendvisualizer.model.BlendFile(
+                uri = Uri.parse(entry.modelUrl),
+                displayName = entry.fileName,
+                sizeBytes = entry.sizeBytes
+            ),
+            conversionStatus = ConversionStatus.Success,
+            previewUri = Uri.parse(entry.modelUrl),
+            statusMessage = "Restaurado do histórico: ${entry.fileName}"
+        )
+    }
+
     fun convertSelectedBlend() {
         val file = uiState.selectedFile ?: return
         uiState = uiState.copy(
@@ -74,6 +100,14 @@ class BlendViewerViewModel(
             }
             uiState = when (result) {
                 is BlendConversionResult.Success -> {
+                    val entry = HistoryEntry(
+                        fileName = file.displayName,
+                        modelUrl = result.modelUri.toString(),
+                        sizeBytes = file.sizeBytes
+                    )
+                    viewModelScope.launch {
+                        historyDao.insertEntry(entry)
+                    }
                     uiState.copy(
                         conversionStatus = ConversionStatus.Success,
                         previewUri = result.modelUri,
@@ -96,18 +130,16 @@ class BlendViewerViewModel(
         val Factory: ViewModelProvider.Factory = viewModelFactory {
             initializer {
                 val application = this[ViewModelProvider.AndroidViewModelFactory.APPLICATION_KEY]
-                val gateway: BlendConversionGateway = if (application != null) {
-                    HttpBlendConversionGateway(
-                        contentResolver = application.contentResolver,
-                        cacheDir = application.cacheDir,
-                        baseUrl = BuildConfig.CONVERTER_BASE_URL,
-                        apiKey = BuildConfig.CONVERTER_API_KEY
-                    )
-                } else {
-                    MockBlendConversionGateway()
-                }
+                val db = AppDatabase.getDatabase(application!!)
+                val gateway: BlendConversionGateway = HttpBlendConversionGateway(
+                    contentResolver = application.contentResolver,
+                    cacheDir = application.cacheDir,
+                    baseUrl = BuildConfig.CONVERTER_BASE_URL,
+                    apiKey = BuildConfig.CONVERTER_API_KEY
+                )
                 BlendViewerViewModel(
-                    conversionGateway = gateway
+                    conversionGateway = gateway,
+                    historyDao = db.historyDao()
                 )
             }
         }
